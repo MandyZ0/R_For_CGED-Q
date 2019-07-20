@@ -1,0 +1,389 @@
+---
+title: "Tutorial for CGED-Q"
+---
+#0. Preparation:准备阶段
+1. Download the package:下载所需要的包(package)
+```{r Download the package:}
+install.packages("rgdal") #Geospatial' Data Abstraction Library
+install.packages("sf") #Simple Features for R
+install.packages("rgeos") #Interface to Geometry Engine - Open Source 
+install.packages("sp")  #Classes and Methods for Spatial Data
+install.packages("raster") #Geographic Data Analysis and Modeling
+install.packages("glue") #Interpreted String Literals
+install.packages("dplyr") #A Grammar of Data Manipulation
+
+install.packages("tmap")
+install.packages("tmaptools")
+install.packages("OpenStreetMap")
+
+install.packages("ggplot2")
+install.packages("ggmap")
+
+install.packages("leaflet")
+```
+
+2.Import the library导入
+
+```{r  Import the library}
+library(rgdal)
+library(sf)
+library(rgeos)
+library(sp)
+library(raster)
+library(glue)
+library(dplyr)
+
+library(tmap)
+library(tmaptools)
+library(OpenStreetMap)
+
+library(ggplot2)
+library(ggmap)
+```
+
+Testing Chinese:
+```{r Testing Chinese}
+Sys.setlocale(locale = "us")
+
+x <- "中文" # if get random thing here, need to change text encoding to utf-8
+Encoding(x) <- "UTF-8"
+Encoding(x)
+```
+
+#1. LOAD POLYGON FILE 导入地理Polygon信息
+```{r load polygon file}
+# read the shp file:
+cnt <- (readOGR(dsn = "./v6_1911_cnty_pgn_utf/v6_1911_cnty_pgn_utf.shp",
+                stringsAsFactors=FALSE))
+```
+
+Change the encoding and correct the type 整理编码信息，修改每一列的数据种类
+```{r correct the type for each column}
+#1-1 ENCODING AND CORRECT TYPE:
+col_names = colnames(cnt@data)
+
+#*****change character encoding to UTF-8******:
+for (col in colnames(cnt@data)){
+  if (class(cnt@data[[col]]) == "character"){
+    Encoding(cnt@data[[col]]) <- "UTF-8"
+    cnt@data[[col]]<- iconv(cnt@data[[col]], from = "UTF-8", to = "Latin1")
+    Encoding(cnt@data[[col]]) <- "UTF-8"
+  }
+}
+
+#factor:
+
+for (col in (c("LEV_RANK", "BEG_RULE", "END_RULE", "DYN_PY", "BEG_YR","END_YR",
+               "DYN_CH","LEV1_PY","LEV1_CH","LEV2_PY","LEV2_CH","OBJ_TYPE","COMPILER","GEOCOMP","TYPE_PY", "TYPE_CH"))){
+  cnt@data[[col]] <- as.factor(cnt@data[[col]])
+}
+
+#change some number to correct number type:
+for (col in c("SYS_ID", "OID_", "NOTE_ID", "SYS_ID_1","X_COORD","Y_COORD")){
+  print(col)
+  cnt@data[[col]] <- as.numeric(cnt@data[[col]])
+}
+
+#check col name and type again:
+sapply(cnt@data, class)
+
+#modify the cnt to show only 2 characters:
+cnt$NAME_FT <- substr(cnt$NAME_FT,1,2)
+
+cnt_name = levels(as.factor(cnt$NAME_FT))
+
+#rm unwanted variables:
+rm(col)
+```
+
+#2. LOAD CGED-Q FILE 导入CGED-Q 信息
+
+```{r Load CGED-Q file}
+# header = FALSE to encode colname as well
+jsl <- read.csv("./CGED-Q/CGED-Q+Public+Release+1900-1912+9+May+2019.csv",header = TRUE, stringsAsFactors = TRUE, encoding = "UTF-8")
+#get col name:
+jsl_cp <- read.csv("./CGED-Q/CGED-Q+Public+Release+1900-1912+9+May+2019.csv",header = FALSE, stringsAsFactors = FALSE, encoding = "UTF-8", nrows = 1)
+
+colnames(jsl) <- jsl_cp[1, ] # the first row will be the header
+colnames(jsl)[1] <- "阳历年份" #fix some strange bug
+rm(jsl_cp)
+
+#change jsl to correct datatype:
+#factor_additional:
+
+for (col in c("阳历年份", "季节号", "插补号", "卷号", "册号")){
+  jsl[[col]] <- as.factor(jsl[[col]])
+}
+
+#character_additional:
+jsl[["姓"]] <- as.character(jsl[["姓"]])
+jsl[["名"]] <- as.character(jsl[["名"]])
+jsl[["字号"]] <- as.character(jsl[["字号"]])
+
+#FINISH
+```
+
+
+整理CGED-Q的数据
+```{r match the name from jsl to cnt}
+
+#Start matching the county name
+
+#clean the data
+#1. remove cnt which is NA
+jsl <- jsl[jsl["籍贯县"] != "",]
+#2. remove cnt which has unrecognized name:
+jsl <- jsl[!(jsl[["籍贯县"]] %in% (grep("？", levels(as.factor(as.character(jsl[["籍贯县"]]))), value = TRUE))),]
+
+#3. change typo, ex: "甯" to "寧"
+jsl[["籍贯县"]] <- gsub("甯","寧",jsl[["籍贯县"]])
+jsl[["籍贯县"]] <- gsub("寗","寧",jsl[["籍贯县"]])
+jsl[["籍贯县"]] <- gsub("寕","寧",jsl[["籍贯县"]])
+
+jsl[["籍贯县"]] <- gsub(" ","",jsl[["籍贯县"]])
+
+#4. keep only the first 2 characters
+jsl[["籍贯县"]] <- substr(jsl[["籍贯县"]], 1, 2)
+
+#5. check which county is not in cnt_name
+jsl_name_unshow_in_cnt <- jsl[!(jsl[["籍贯县"]] %in% cnt$NAME_FT),][["籍贯县"]]
+jsl_name_unshow_in_cnt <- levels(as.factor(jsl_name_unshow_in_cnt))
+
+# Here we only keep the counties which appeared both in cnt and jsl
+jsl <- jsl[!(jsl[["籍贯县"]] %in% jsl_name_unshow_in_cnt),]
+```
+
+
+#3. PREPARE THE ATTRIBUTE YOU WANT TO VISUALIZE 准备需要可视化的信息
+```{r prepare the ranking for each county}
+# need to summarize what you want to show from jsl, and then join into cnt polygon 
+jsl_sel <- jsl[(jsl[["阳历年份"]]== 1911) & ! is.na(jsl[["阳历年份"]]),]
+people_ag <-as.data.frame(table(unlist(jsl_sel[["籍贯县"]])))
+colnames(people_ag) <- c("籍贯县","FREQUENCY")
+
+people_ag <- people_ag[order(people_ag$FREQUENCY),]
+rownames(people_ag) <- NULL
+people_ag$rank <- dense_rank(people_ag$FREQUENCY)
+
+# Show the first two rows of the aggregated data
+head(people_ag, 2)
+
+head(cnt$NAME_FT) # dataset to add to (results not shown)
+head(people_ag$"籍贯县") # the variables to join
+```
+
+
+```{r Join two tables}
+#the `left_join` function from the **dplyr** package but the `merge` function
+#could equally be used. 
+head(left_join(cnt@data, people_ag, by = c('NAME_FT' = '籍贯县'))) # test it works
+#We use left_join because we want the length of the data frame to remain unchanged
+cnt@data <- left_join(cnt@data, people_ag, by = c('NAME_FT' = '籍贯县'))
+```
+
+#(Alternative) 4. PLOT USING BASIC PLOT FUNCTION 用基本的函数画地图
+```{r 4-0 whole picture}
+#WHOLE PICTURE
+plot(cnt)
+#draft try, testing on cnt shp data
+```
+
+```{r 4-1: plot the first 5 counties in the list:}
+#4-1: plot the first 5 counties in the list:
+sel <- head(cnt, n = 5)
+plot(sel)
+
+#highlight the first county to blue:
+sel <- head(cnt, n = 1)
+plot(sel, add = T, col = "lightblue")
+```
+
+```{r 4-2: print selected name county:}
+#4-2: print selected name county:
+sel <- cnt[cnt$NAME_FT == "懷柔",]
+plot(sel, col = "lightblue") 
+```
+
+```{r 4-3 plot subplaces around one place:}
+#4-3:1 plot subplaces around one place:
+sel <- cnt[cnt$NAME_FT == "懷柔",]
+cent_cnt <- gCentroid(cnt[sel,]) 
+points(cent_lnd, cex = 3)
+
+#4-3:2 set 10 km buffer, get a buffer from point cent_lnd
+cnt_buffer <- gBuffer(spgeom = cent_cnt, width = 50000) 
+
+#4-3:3 subsetting selects any intersecting zones - light blue
+cnt_central <- cnt[cnt_buffer,] # the selection is too big!
+# test the selection for the previous method - uncomment below
+plot(cnt_central, col = "lightblue")
+plot(sel, add = T, col = "lightyellow") # highlight the selected area
+
+#4-4: plot acoording to Area condition
+cnt_area <- gArea(cnt,byid = TRUE) #calculate every counties area
+sel <- cnt[cnt_area > 1e+10,]
+plot(sel)
+```
+
+
+#5. PLOT USING DIFFERENT PACKAGES 用不同用户包画地图
+#5-1: tmap package
+Which you've been imported before
+
+library(tmap)
+library(tmaptools)
+library(OpenStreetMap)
+
+```{r 5-1-1:qtm: Quick thematic map plot}
+#5-1-1:qtm: Quick Thematic Map
+qtm(cnt, fill = "rank") # plot the basic map
+```
+
+
+```{r 5-1-2: changing the color}
+#5-1-2
+#more examples for basic usage of tmap:
+#inverted the color scheme, deeper color means less frequency:
+# The sequential palettes names are Blues BuGn BuPu GnBu Greens Greys Oranges OrRd PuBu PuBuGn PuRd Purples RdPu Reds YlGn YlGnBu YlOrBr YlOrRd
+# The diverging palettes are BrBG PiYG PRGn PuOr RdBu RdGy RdYlBu RdYlGn Spectral And also cool_warm. 
+qtm(shp = cnt, fill = "rank", fill.palette = "YlGn")
+```
+
+
+```{r 5-1-3: Using seperate functions to realize the same visualization:}
+#5-1-3: Using seperate functions to realize the same visualization:
+#it's equal to qtm(cnt, fill = "rank")
+tm_img <- tm_shape(cnt) +
+  tm_fill("rank", style = "cont" ,n = 10, thres.poly = 0) +
+  tm_borders(col = "grey80", lwd = 0.5)
+tm_img
+#check the color cheatsheet for the color you want
+
+tmap_save(tm = tm_img, filename = "../../Time_series/5-1-3.png")
+```
+
+
+```{r 5-1-4:If you want to add basemap:}
+#5-1-4:If you want basemap:
+#To create a basemap with tmap, you can use the `read_osm` function, 
+#from the [**tmaptools** package](https://github.com/mtennekes/tmaptools) as follows. 
+#Note that you must first transform the data into wgs
+cnt_wgs <- spTransform(cnt, CRS("+init=epsg:4326"))
+osm_tiles <- read_osm(bbox(cnt_wgs))# read basemap from OpenStreetMap
+
+#method1, static map: 
+tmap_mode("plot")
+tm_img <- tm_shape(osm_tiles) +
+  tm_raster() +
+  tm_shape(cnt_wgs) +
+  tm_fill("rank", fill.title = "1911 Ranking of Each County", style = "cont" ,n = 10, scale = 1, alpha = 0.6)
+
+tmap_save(tm = tm_img, filename = "../../Time_series/5-1-4.png")
+```
+
+
+```{r 5-1-4:method2: with view mode}
+#method2:
+#By changing map mode, tmap_mode("view"), this will make the maps appear on a zoomable webmap powered by leaflet. 
+tmap_mode("view")
+  tm_basemap(bbox(cnt_wgs),server = "OpenStreetMap.Mapnik") +
+  tm_shape(cnt_wgs) +
+  tm_fill("rank", style = "cont" ,n = 10, scale = 1, alpha = 0.6)
+```
+#5-2: ggplot package
+```{r 5-2-1:plot points using ggplot:}
+#5-2-1:plot points using ggplot:
+p <- ggplot(cnt_wgs@data, aes(X_COORD,Y_COORD))
+#The real power of ggplot2 lies in its ability to add layers to a plot. In this case we can add text to the plot.
+#***ggplot2 cannot directly plot spatial object
+p + geom_point(aes(colour = -`rank`))
+```
+
+ggplot cannot directly plot spatial object, so we need transfer it to dataframe
+
+```{r 5-2-2: plot polygon using ggplot: preparation}
+#5-2-2-1: preparation
+# whether you want to only plot the selected part: sel = cnt[cnt$`rank` < 200 & !(is.na(cnt$`rank`)),]
+cnt_f <- broom::tidy(cnt_wgs)#(after this step, cnt_f only contains polygon informaiton, it doesnt have other data information, so need to use left join from dplyr to join back the data information
+
+head(cnt_f, n = 2) # peak at the fortified data
+cnt_wgs$id <- row.names(cnt_wgs) # allocate an id variable to the sp data
+head(cnt_wgs@data, n = 2) # final check before join (requires shared variable name)
+cnt_f <- left_join(cnt_f, cnt_wgs@data) # join the data
+```
+
+
+```{r 5-2-2: plot polygon using ggplot:}
+#create the ggplot (as we mentioned before, ggplot cannot directly plot spatial object.)
+#long, lat are new col generated by tidy function
+#Now we can use ggplot to plot polygon information
+#**group = id is important
+map <- ggplot(cnt_f, aes(long, lat, group = id, fill =`rank`)) +
+  geom_polygon() + coord_equal() +
+  labs(x = "X_COORD", y = "Y_COORD") +
+  ggtitle("rank")
+
+#plot the map
+map + scale_fill_gradient(low = "white", high = "red")
+ggsave("../../Time_series/5-2-2.png", device = "png", scale = 5)
+```
+```{r}
+#use ggmap for basemap:
+# download map data for the lnd data and plot, there are three map source: google, openstreetmap,stamenmap.
+#Since OpenStreetMap doesn't support get_map anymore, if you don't have google API, you can choose get_stamenmap
+#as well as choosing maptype:
+cnt_wgs = spTransform(cnt, CRS("+init=epsg:4326")) # need to transfer to wgs
+b <- bbox(cnt_wgs)
+map <- ggmap(get_stamenmap(b, zoom = 7, maptype = "toner-lite"))  
+```
+
+
+```{r use ggmap for basemap:}
+#plot the map:
+map + 
+  geom_polygon(data = cnt_f, aes(x = long, y = lat, group = id, fill = `rank`), alpha = 0.6) +
+  scale_fill_gradient(low = "lightyellow", high = "red")
+
+ggsave("../../Time_series/5-2-3.png", device = "png", scale = 5)
+```
+
+
+#6 MORE ATTEMPT: PLOT JIANSHENG INFORMATION 可视化监生的来源分布
+```{r}
+
+jsl_sel_2 <- jsl_sel[jsl_sel[["出身一"]]== "監生",]
+people_ag <-as.data.frame(table(unlist(jsl_sel_2[["籍贯县"]])))
+colnames(people_ag) <- c("籍贯县","jiansheng")
+
+people_ag <- people_ag[order(people_ag$jiansheng),]
+rownames(people_ag) <- NULL
+people_ag$js <- dense_rank(people_ag$jiansheng)
+
+# Show the first two rows of the aggregated data
+head(people_ag, 2)
+
+head(cnt$NAME_FT) # dataset to add to (results not shown)
+head(people_ag$"籍贯县") # the variables to join
+```
+
+
+```{r Join two tables}
+#the `left_join` function from the **dplyr** package but the `merge` function
+#could equally be used. 
+head(left_join(cnt_wgs@data, people_ag, by = c('NAME_FT' = '籍贯县'))) # test it works
+#We use left_join because we want the length of the data frame to remain unchanged
+cnt_wgs@data <- left_join(cnt_wgs@data, people_ag, by = c('NAME_FT' = '籍贯县'))
+```
+
+```{r}
+#method1, static map: 
+tmap_mode("plot")
+tm_img <- tm_shape(osm_tiles) +
+  tm_raster() +
+  tm_shape(cnt_wgs) +
+  tm_fill("js", style = "cont" ,n = 10, scale = 1, alpha = 0.6)
+
+tmap_save(tm = tm_img, filename = "../../Time_series/6.png")
+  
+```
+
