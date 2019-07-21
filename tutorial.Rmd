@@ -157,7 +157,7 @@ jsl <- jsl[!(jsl[["籍贯县"]] %in% jsl_name_unshow_in_cnt),]
 #3. PREPARE THE ATTRIBUTE YOU WANT TO VISUALIZE 准备需要可视化的信息
 ```{r prepare the ranking for each county}
 # need to summarize what you want to show from jsl, and then join into cnt polygon 
-jsl_sel <- jsl[(jsl[["阳历年份"]]== 1911) & ! is.na(jsl[["阳历年份"]]),]
+jsl_sel <- jsl[(jsl[["阳历年份"]]== 1911) & (! is.na(jsl[["阳历年份"]])) & (jsl[["出版单位"]] == "") ,]
 people_ag <-as.data.frame(table(unlist(jsl_sel[["籍贯县"]])))
 colnames(people_ag) <- c("籍贯县","FREQUENCY")
 
@@ -179,6 +179,20 @@ head(people_ag$"籍贯县") # the variables to join
 head(left_join(cnt@data, people_ag, by = c('NAME_FT' = '籍贯县'))) # test it works
 #We use left_join because we want the length of the data frame to remain unchanged
 cnt@data <- left_join(cnt@data, people_ag, by = c('NAME_FT' = '籍贯县'))
+```
+```{r}
+#***NEW** get correct boundary box
+b_cnt <- bbox(cnt)
+b_cnt[2,1] <- 1000000
+
+#If you want basemap:
+#To create a basemap with tmap, you can use the `read_osm` function, 
+#from the [**tmaptools** package](https://github.com/mtennekes/tmaptools) as follows. 
+#Note that you must first transform the data into wgs
+cnt_wgs <- spTransform(cnt, CRS("+init=epsg:4326"))
+b <- bbox(cnt_wgs)
+b[2,1] <- 4 #enlarge the longitude
+
 ```
 
 #(Alternative) 4. PLOT USING BASIC PLOT FUNCTION 用基本的函数画地图
@@ -236,7 +250,7 @@ library(OpenStreetMap)
 
 ```{r 5-1-1:qtm: Quick thematic map plot}
 #5-1-1:qtm: Quick Thematic Map
-qtm(cnt, fill = "rank") # plot the basic map
+qtm(cnt, fill = "rank", bbox = b_cnt) # plot the basic map
 ```
 
 
@@ -246,14 +260,14 @@ qtm(cnt, fill = "rank") # plot the basic map
 #inverted the color scheme, deeper color means less frequency:
 # The sequential palettes names are Blues BuGn BuPu GnBu Greens Greys Oranges OrRd PuBu PuBuGn PuRd Purples RdPu Reds YlGn YlGnBu YlOrBr YlOrRd
 # The diverging palettes are BrBG PiYG PRGn PuOr RdBu RdGy RdYlBu RdYlGn Spectral And also cool_warm. 
-qtm(shp = cnt, fill = "rank", fill.palette = "YlGn")
+qtm(shp = cnt, fill = "rank", fill.palette = "YlGn", bbox = b_cnt)
 ```
 
 
 ```{r 5-1-3: Using seperate functions to realize the same visualization:}
 #5-1-3: Using seperate functions to realize the same visualization:
 #it's equal to qtm(cnt, fill = "rank")
-tm_img <- tm_shape(cnt) +
+tm_img <- tm_shape(cnt, bbox = b_cnt) +
   tm_fill("rank", style = "cont" ,n = 10, thres.poly = 0) +
   tm_borders(col = "grey80", lwd = 0.5)
 tm_img
@@ -263,37 +277,39 @@ tmap_save(tm = tm_img, filename = "../../Time_series/5-1-3.png")
 ```
 
 
-```{r 5-1-4:If you want to add basemap:}
+```{r 5-1-4(X):If you want to add basemap:}
 #5-1-4:If you want basemap:
 #To create a basemap with tmap, you can use the `read_osm` function, 
 #from the [**tmaptools** package](https://github.com/mtennekes/tmaptools) as follows. 
 #Note that you must first transform the data into wgs
-cnt_wgs <- spTransform(cnt, CRS("+init=epsg:4326"))
-osm_tiles <- read_osm(bbox(cnt_wgs))# read basemap from OpenStreetMap
+#***07/20/2019: it seemed we cannot use read_osm in China
+osm_tiles <- read_osm(b)# read basemap from OpenStreetMap
 
 #method1, static map: 
 tmap_mode("plot")
-tm_img <- tm_shape(osm_tiles) +
+tm_img <- tm_shape(osm_tiles, bbox = b) +
   tm_raster() +
   tm_shape(cnt_wgs) +
   tm_fill("rank", fill.title = "1911 Ranking of Each County", style = "cont" ,n = 10, scale = 1, alpha = 0.6)
 
-tmap_save(tm = tm_img, filename = "../../Time_series/5-1-4.png")
+tmap_save(tm = tm_img, filename = "../Time_series/5-1-4.png")
 ```
 
 
 ```{r 5-1-4:method2: with view mode}
 #method2:
 #By changing map mode, tmap_mode("view"), this will make the maps appear on a zoomable webmap powered by leaflet. 
+#check demo source maps from http://leaflet-extras.github.io/leaflet-providers/preview/
 tmap_mode("view")
-  tm_basemap(bbox(cnt_wgs),server = "OpenStreetMap.Mapnik") +
+  tm_basemap(bbox(cnt_wgs),server = "Esri.NatGeoWorldMap") +
   tm_shape(cnt_wgs) +
   tm_fill("rank", style = "cont" ,n = 10, scale = 1, alpha = 0.6)
 ```
 #5-2: ggplot package
 ```{r 5-2-1:plot points using ggplot:}
 #5-2-1:plot points using ggplot:
-p <- ggplot(cnt_wgs@data, aes(X_COORD,Y_COORD))
+p <- ggplot(cnt_wgs@data, aes(X_COORD,Y_COORD))+
+  ylim(10,NA) #enlarge the longitude
 #The real power of ggplot2 lies in its ability to add layers to a plot. In this case we can add text to the plot.
 #***ggplot2 cannot directly plot spatial object
 p + geom_point(aes(colour = -`rank`))
@@ -321,19 +337,21 @@ cnt_f <- left_join(cnt_f, cnt_wgs@data) # join the data
 map <- ggplot(cnt_f, aes(long, lat, group = id, fill =`rank`)) +
   geom_polygon() + coord_equal() +
   labs(x = "X_COORD", y = "Y_COORD") +
-  ggtitle("rank")
+  ggtitle("rank") +
+  ylim(10,NA) #enlarge the longitude
 
 #plot the map
 map + scale_fill_gradient(low = "white", high = "red")
 ggsave("../../Time_series/5-2-2.png", device = "png", scale = 5)
 ```
+
+
+
 ```{r}
 #use ggmap for basemap:
 # download map data for the lnd data and plot, there are three map source: google, openstreetmap,stamenmap.
 #Since OpenStreetMap doesn't support get_map anymore, if you don't have google API, you can choose get_stamenmap
 #as well as choosing maptype:
-cnt_wgs = spTransform(cnt, CRS("+init=epsg:4326")) # need to transfer to wgs
-b <- bbox(cnt_wgs)
 map <- ggmap(get_stamenmap(b, zoom = 7, maptype = "toner-lite"))  
 ```
 
